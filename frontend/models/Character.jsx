@@ -1,11 +1,13 @@
 "use client";
 import React, { useRef, useEffect, forwardRef, useState } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { useGLTF, useAnimations } from '@react-three/drei';
 import { RigidBody, CapsuleCollider, quat } from '@react-three/rapier';
 import * as THREE from 'three';
 
 const Character = forwardRef((props, ref) => {
+  const { camera } = useThree(); // ⬅️ Grabbing built-in camera directly
+
   const { scene, animations } = useGLTF('/man.glb');
   const modelRef = useRef();
   const { actions } = useAnimations(animations, modelRef);
@@ -13,8 +15,8 @@ const Character = forwardRef((props, ref) => {
 
   const body = useRef();
   const [yaw, setYaw] = useState(0);
+  const [pitch, setPitch] = useState(0);
   const isPointerLocked = useRef(false);
-  const cameraRef = useRef();
 
   useEffect(() => {
     if (ref) {
@@ -23,7 +25,6 @@ const Character = forwardRef((props, ref) => {
     }
   }, [ref]);
 
-  // Keyboard controls
   const keys = useRef({ forward: false, backward: false, left: false, right: false });
 
   useEffect(() => {
@@ -72,13 +73,12 @@ const Character = forwardRef((props, ref) => {
     const handleMouseMove = (e) => {
       if (isPointerLocked.current) {
         setYaw(prev => prev - e.movementX * 0.002);
-        console.log(`Mouse Move X: ${e.movementX}, Y: ${e.movementY}`);
+        setPitch(prev => Math.max(Math.min(prev - e.movementY * 0.002, Math.PI / 2), -Math.PI / 2));
       }
     };
 
     const handlePointerLockChange = () => {
       isPointerLocked.current = document.pointerLockElement === document.body;
-      console.log('Pointer Lock State:', isPointerLocked.current ? 'Locked' : 'Unlocked');
     };
 
     const handleClick = () => {
@@ -110,65 +110,66 @@ const Character = forwardRef((props, ref) => {
   const SPEED = 5;
 
   useFrame(() => {
-    if (!body.current) return;
-
+    if (!body.current || !camera) return;
+  
+    // Calculate movement direction based on keyboard input
     frontVector.set(0, 0, (keys.current.backward ? 1 : 0) - (keys.current.forward ? 1 : 0));
-    sideVector.set((keys.current.left ? 1 : 0) - (keys.current.right ? 1 : 0), 0, 0);
+    sideVector.set((keys.current.left ? 1 : 0) - (keys.current.right ? 1 : 0));
     direction.copy(frontVector).add(sideVector).normalize().multiplyScalar(SPEED);
-
-
+  
+    // Apply rotation based on yaw (mouse movement)
+    const currentRotation = quat(body.current.rotation());
+  
     if (isPointerLocked.current) {
-      targetQuat.setFromAxisAngle(upAxis, yaw);
-    } else if (direction.length() > 0) {
-      const angle = Math.atan2(direction.x, direction.z);
-      targetQuat.setFromAxisAngle(upAxis, angle);
+      targetQuat.setFromAxisAngle(upAxis, yaw); // Only update yaw rotation (rotation in place)
     }
-
-    const currentQuat = quat(body.current.rotation());
-    currentQuat.slerp(targetQuat, 0.1);
-    body.current.setRotation(currentQuat, true);
-
+  
+    currentRotation.slerp(targetQuat, 0.1); // Smoothly interpolate rotation
+    body.current.setRotation(currentRotation, true); // Apply the new rotation to the body
+  
     if (modelRef.current) {
-      modelRef.current.rotation.y = yaw;
+      modelRef.current.rotation.y = yaw; // Apply yaw to model rotation
     }
-
-    // Play/stop animation based on movement
-    if (direction.length() > 0) {
-      walkAction?.play();
-    } else {
-      walkAction?.stop();
-    }
-
-
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(currentQuat);
-    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(currentQuat);
-
+  
+    // Move the character using keyboard input (no yaw effect on movement)
+    const forward = new THREE.Vector3(0, 0, -1);  // No rotation applied to forward direction
+    const right = new THREE.Vector3(1, 0, 0);    // No rotation applied to right direction
+  
+    // Apply rotation to direction vectors based on yaw
+    forward.applyQuaternion(currentRotation);
+    right.applyQuaternion(currentRotation);
+  
     const movement = new THREE.Vector3();
     if (keys.current.forward) movement.add(forward);
     if (keys.current.backward) movement.sub(forward);
     if (keys.current.left) movement.sub(right);
     if (keys.current.right) movement.add(right);
-
+  
     movement.normalize().multiplyScalar(SPEED);
-
-    const vel = body.current.linvel();
+  
+    const velocity = body.current.linvel();
     body.current.setLinvel({
       x: movement.x,
-      y: vel.y, 
+      y: velocity.y,
       z: movement.z
     }, true);
-
-   
-    if (cameraRef.current) {
-
-      const offset = new THREE.Vector3(0, 2, -8); 
-      const cameraPosition = body.current.translation().clone().add(offset);
-
-      cameraRef.current.position.copy(cameraPosition); 
-
-      cameraRef.current.lookAt(body.current.translation().x, body.current.translation().y + 1, body.current.translation().z); // Slightly adjusted to look at the character
-    }
+  
+    // Fix camera to follow the character
+    const characterPos = body.current.translation();
+    const cameraOffset = new THREE.Vector3(0, 2, 5);
+    cameraOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw); // Apply yaw for camera positioning
+  
+    const newCameraPos = new THREE.Vector3(
+      characterPos.x + cameraOffset.x,
+      characterPos.y + cameraOffset.y,
+      characterPos.z + cameraOffset.z
+    );
+  
+    camera.position.copy(newCameraPos);
+    camera.lookAt(characterPos.x, characterPos.y + 1, characterPos.z); // Keep the camera looking at the character
   });
+  
+  
 
   return (
     <RigidBody
@@ -177,11 +178,11 @@ const Character = forwardRef((props, ref) => {
       type="dynamic"
       mass={1}
       friction={1}
-      restitution={0} // No bouncing
+      restitution={0}
       enabledRotations={[false, true, false]}
     >
-      <CapsuleCollider args={[0.4, 0.9]} /> {/* radius, height */}
-      <primitive ref={modelRef} object={scene} scale={0.01} position={[0, 1, 0]} />
+      <CapsuleCollider args={[0.4, 0.9]} />
+      <primitive ref={modelRef} object={scene} scale={0.0005} position={[0, 2, 0]} />
     </RigidBody>
   );
 });
